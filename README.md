@@ -70,18 +70,27 @@ set -Ux HF_TOKEN "hf_..."
 
 1. Create an account at [opensubtitles.com](https://www.opensubtitles.com/)
 2. Go to [API consumers](https://www.opensubtitles.com/en/consumers) and register an app
-3. Set the environment variable:
+3. Set the environment variables:
 
 ```bash
 # bash / zsh (~/.bashrc or ~/.zshrc)
-export OPENSUBTITLES_API_KEY="your-key-here"
+export OPENSUBTITLES_API_KEY="your-api-key"
+export OPENSUBTITLES_USERNAME="your-username"
+export OPENSUBTITLES_PASSWORD="your-password"
 
 # fish (~/.config/fish/config.fish)
-set -Ux OPENSUBTITLES_API_KEY "your-key-here"
+set -Ux OPENSUBTITLES_API_KEY "your-api-key"
+set -Ux OPENSUBTITLES_USERNAME "your-username"
+set -Ux OPENSUBTITLES_PASSWORD "your-password"
 
 # Windows (PowerShell, permanent for current user)
-[Environment]::SetEnvironmentVariable("OPENSUBTITLES_API_KEY", "your-key-here", "User")
+[Environment]::SetEnvironmentVariable("OPENSUBTITLES_API_KEY", "your-api-key", "User")
+[Environment]::SetEnvironmentVariable("OPENSUBTITLES_USERNAME", "your-username", "User")
+[Environment]::SetEnvironmentVariable("OPENSUBTITLES_PASSWORD", "your-password", "User")
 ```
+
+The API key is required for searching. Username and password are needed for downloading
+(the API requires authentication for downloads).
 
 ## Usage
 
@@ -154,10 +163,10 @@ If the hash does not match, a warning is shown and you can choose to download or
 ### Sync subtitles
 
 ```bash
-# Sync an SRT file to the video's audio
+# Sync an SRT file to the video's audio (overwrites the original)
 python subtitle_tool.py video.mkv --sync subtitle.srt
 
-# Specify output file
+# Save to a different file instead
 python subtitle_tool.py video.mkv --sync subtitle.srt -o synced.srt
 ```
 

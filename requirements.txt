@@ -1,4 +1,5 @@
 faster-whisper
 ffsubsync
+setuptools<81
 nvidia-cublas-cu12
 nvidia-cudnn-cu12
