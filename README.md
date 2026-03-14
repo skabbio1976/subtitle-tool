@@ -98,10 +98,22 @@ included in the default processing pipeline (extract → download → whisper).
 
 When you run `python subtitle_tool.py video.mkv`, the tool tries these steps in order:
 
-1. **Extract** embedded subtitles from the video file
-2. **Download** from OpenSubtitles.com (if credentials are configured)
-   - Auto-syncs to video audio when hash doesn't match
-3. **Transcribe** with Whisper (as a last resort)
+```mermaid
+flowchart TD
+    A[Video file] --> B{Embedded subs?}
+    B -->|Text-based| C[Extract with ffmpeg]
+    B -->|Bitmap PGS/VobSub| D{OpenSubtitles\ncredentials?}
+    B -->|None| D
+    D -->|Yes| E[Search by hash]
+    D -->|No| I
+    E -->|Hash match| F[Download]
+    E -->|No match| G[Download + auto-sync]
+    E -->|Not found| I[Whisper transcription]
+    F --> H[Done]
+    G --> H
+    C --> H
+    I --> H
+```
 
 Directories are searched recursively, so you can point it at a whole library.
 
