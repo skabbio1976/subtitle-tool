@@ -17,7 +17,7 @@ Extract, transcribe, translate, or download subtitles for video files.
 - ffmpeg and ffprobe
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (for transcription)
 - [ffsubsync](https://github.com/smacke/ffsubsync) (for sync)
-- CUDA-compatible GPU (for Whisper)
+- CUDA-compatible GPU (recommended for Whisper, CPU mode available via `--device cpu`)
 
 ```
 pip install -r requirements.txt
@@ -100,9 +100,21 @@ python subtitle_tool.py --only-whisper video.mkv
 # Specify language and model
 python subtitle_tool.py -l sv -m large-v3 video.mkv
 
-# Overwrite existing .en.srt files
+# Overwrite existing subtitle files
 python subtitle_tool.py --force video.mkv
+
+# Run on CPU (no GPU required, slower)
+python subtitle_tool.py --device cpu video.mkv
+
+# Use a smaller model (less VRAM / faster on CPU)
+python subtitle_tool.py -m medium video.mkv
+python subtitle_tool.py -m small video.mkv
+
+# Use float16 precision (better quality, needs more VRAM)
+python subtitle_tool.py --compute-type float16 video.mkv
 ```
+
+If Whisper runs out of GPU memory, it automatically falls back to CPU.
 
 ### Translate subtitles
 
