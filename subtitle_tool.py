@@ -126,8 +126,16 @@ def sync_subtitles(video_path: Path, srt_path: Path, output_path: Path | None) -
     return True
 
 
+# Bitmap subtitle codecs that cannot be extracted to SRT
+_BITMAP_SUB_CODECS = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}
+
+
 def ffprobe_subtitle_streams(video_path: Path) -> list[dict]:
-    """Return list of subtitle streams in the video file."""
+    """Return list of text-based subtitle streams in the video file.
+
+    Bitmap formats (PGS, VobSub, DVB) are excluded as they cannot be
+    converted to SRT.
+    """
     cmd = [
         "ffprobe", "-v", "quiet",
         "-print_format", "json",
@@ -139,7 +147,9 @@ def ffprobe_subtitle_streams(video_path: Path) -> list[dict]:
     if result.returncode != 0:
         return []
     data = json.loads(result.stdout)
-    return data.get("streams", [])
+    streams = data.get("streams", [])
+    # Filter out bitmap subtitle formats
+    return [s for s in streams if s.get("codec_name") not in _BITMAP_SUB_CODECS]
 
 
 def extract_subtitles(video_path: Path, output_path: Path) -> bool:
