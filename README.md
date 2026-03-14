@@ -20,7 +20,7 @@ Extract, transcribe, translate, or download subtitles for video files.
 - CUDA-compatible GPU (for Whisper)
 
 ```
-pip install faster-whisper ffsubsync
+pip install -r requirements.txt
 ```
 
 ## API keys
@@ -43,6 +43,27 @@ set -Ux ANTHROPIC_API_KEY "sk-ant-..."
 
 # Windows (PowerShell, permanent for current user)
 [Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY", "sk-ant-...", "User")
+```
+
+### Hugging Face (optional) - for faster Whisper model downloads
+
+Whisper models are downloaded from Hugging Face Hub on first run. Setting a
+token removes rate limits and speeds up downloads. Without a token you may see
+a warning — this is harmless, downloads still work.
+
+1. Create an account at [huggingface.co](https://huggingface.co/)
+2. Go to **Settings > Access Tokens** and create a token
+3. Set the environment variable:
+
+```bash
+# bash / zsh (~/.bashrc or ~/.zshrc)
+export HF_TOKEN="hf_..."
+
+# fish (~/.config/fish/config.fish)
+set -Ux HF_TOKEN "hf_..."
+
+# Windows (PowerShell, permanent for current user)
+[Environment]::SetEnvironmentVariable("HF_TOKEN", "hf_...", "User")
 ```
 
 ### OpenSubtitles - for `--opensubtitles`
@@ -127,6 +148,32 @@ python subtitle_tool.py video.mkv --sync subtitle.srt
 # Specify output file
 python subtitle_tool.py video.mkv --sync subtitle.srt -o synced.srt
 ```
+
+## Building a standalone binary
+
+If you don't want to install Python and dependencies globally, you can build a
+single executable with PyInstaller:
+
+```bash
+# Create a venv and install everything
+python -m venv .venv
+source .venv/bin/activate        # bash/zsh
+# source .venv/bin/activate.fish  # fish
+# .venv\Scripts\activate          # Windows
+
+pip install faster-whisper ffsubsync pyinstaller
+
+# Build single-file binary
+pyinstaller --onefile subtitle_tool.py
+
+# The binary is now in dist/
+./dist/subtitle_tool --help
+```
+
+> **Note:** The binary will be large (~300-500 MB) because it bundles the Python
+> runtime and all dependencies including CUDA/cuDNN libraries from faster-whisper.
+> Whisper model files are **not** included — they are downloaded on first run.
+> ffmpeg/ffprobe must still be installed separately on the system.
 
 ## Supported formats
 

@@ -10,6 +10,7 @@ Med --translate-subs kan SRT-filer oversattas via Claude API.
 import argparse
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -21,6 +22,35 @@ from pathlib import Path
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".webm", ".mov", ".ts"}
 SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".sub"}
+
+
+def check_dependencies(needs_ffmpeg=True, needs_whisper=False, needs_sync=False):
+    """Kontrollera att verktyg och bibliotek finns. Avslutar med instruktioner om nagot saknas."""
+    missing = []
+
+    if needs_ffmpeg:
+        if not shutil.which("ffmpeg"):
+            missing.append(("ffmpeg", "Installera via pakethanteraren (apt/pacman/brew/choco)"))
+        if not shutil.which("ffprobe"):
+            missing.append(("ffprobe", "Installeras tillsammans med ffmpeg"))
+
+    if needs_whisper:
+        try:
+            from faster_whisper import WhisperModel  # noqa: F401
+        except ImportError:
+            missing.append(("faster-whisper", "pip install faster-whisper"))
+
+    if needs_sync:
+        try:
+            import ffsubsync  # noqa: F401
+        except ImportError:
+            missing.append(("ffsubsync", "pip install ffsubsync"))
+
+    if missing:
+        print("Saknade beroenden:", file=sys.stderr)
+        for name, fix in missing:
+            print(f"  - {name}: {fix}", file=sys.stderr)
+        sys.exit(1)
 
 
 def sync_subtitles(video_path: Path, srt_path: Path, output_path: Path | None) -> bool:
@@ -84,15 +114,39 @@ def extract_subtitles(video_path: Path, output_path: Path) -> bool:
     return True
 
 
-def transcribe_with_whisper(video_path: Path, output_path: Path,
-                            model_name: str, language: str | None) -> bool:
-    """Transkribera ljud med faster-whisper och spara som SRT."""
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError:
-        print("Fel: faster-whisper ar inte installerat.", file=sys.stderr)
-        print("Kor: pip install faster-whisper", file=sys.stderr)
-        return False
+def _load_whisper_model(whisper_cls, model_name: str, compute_type: str = "int8"):
+    """Ladda Whisper-modell med informativ progress."""
+    cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+    model_cached = (cache_dir / f"models--Systran--faster-whisper-{model_name}").exists()
+
+    if model_cached:
+        print(f"  Laddar Whisper-modell '{model_name}' ({compute_type})...")
+    else:
+        print(f"  Laddar ner Whisper-modell '{model_name}' "
+              f"(forsta gangen, kan ta flera minuter)...")
+
+    model = whisper_cls(model_name, device="cuda", compute_type=compute_type)
+    print(f"  Modell redo.")
+    return model
+
+
+def transcribe_with_whisper(video_path: Path, output_path: Path | None,
+                            model_name: str, language: str | None,
+                            whisper_model=None, force: bool = False,
+                            compute_type: str = "int8") -> bool:
+    """Transkribera ljud med faster-whisper och spara som SRT.
+
+    Om output_path ar None bestams filnamnet fran detekterat sprak.
+    Om whisper_model ar None laddas modellen automatiskt.
+    """
+    if whisper_model is None:
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError:
+            print("Fel: faster-whisper ar inte installerat.", file=sys.stderr)
+            print("Kor: pip install faster-whisper", file=sys.stderr)
+            return False
+        whisper_model = _load_whisper_model(WhisperModel, model_name, compute_type)
 
     # Extrahera ljud till temporar WAV-fil
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -112,27 +166,51 @@ def transcribe_with_whisper(video_path: Path, output_path: Path,
         Path(wav_path).unlink(missing_ok=True)
         return False
 
-    print(f"  Laddar Whisper-modell '{model_name}'...")
-    model = WhisperModel(model_name, device="cuda", compute_type="float16")
-
     print(f"  Transkriberar...")
     kwargs = {}
     if language:
         kwargs["language"] = language
 
-    segments, info = model.transcribe(wav_path, **kwargs)
-    detected_lang = info.language
-    print(f"  Detekterat sprak: {detected_lang} (sannolikhet: {info.language_probability:.1%})")
+    try:
+        segments, info = whisper_model.transcribe(wav_path, **kwargs)
+        detected_lang = info.language
+        print(f"  Detekterat sprak: {detected_lang} (sannolikhet: {info.language_probability:.1%})")
 
-    # Generera SRT
-    srt_lines = []
-    for i, segment in enumerate(segments, start=1):
-        start_ts = format_srt_timestamp(segment.start)
-        end_ts = format_srt_timestamp(segment.end)
-        srt_lines.append(f"{i}")
-        srt_lines.append(f"{start_ts} --> {end_ts}")
-        srt_lines.append(segment.text.strip())
-        srt_lines.append("")
+        # Bestam output-sokvag fran detekterat sprak om inte angiven
+        if output_path is None:
+            output_path = video_path.parent / (video_path.stem + f".{detected_lang}.srt")
+            if output_path.exists() and not force:
+                print(f"  Finns redan: {output_path.name}")
+                Path(wav_path).unlink(missing_ok=True)
+                return True
+
+        print(f"  Sparar till: {output_path.name}")
+
+        # Generera SRT
+        srt_lines = []
+        for i, segment in enumerate(segments, start=1):
+            start_ts = format_srt_timestamp(segment.start)
+            end_ts = format_srt_timestamp(segment.end)
+            srt_lines.append(f"{i}")
+            srt_lines.append(f"{start_ts} --> {end_ts}")
+            srt_lines.append(segment.text.strip())
+            srt_lines.append("")
+
+    except RuntimeError as e:
+        err = str(e)
+        Path(wav_path).unlink(missing_ok=True)
+        if "not found or cannot be loaded" in err:
+            print(f"\n  Fel: CUDA-bibliotek saknas: {e}", file=sys.stderr)
+            print(f"  Kor: pip install nvidia-cublas-cu12 nvidia-cudnn-cu12", file=sys.stderr)
+            return False
+        if "out of memory" in err.lower():
+            print(f"\n  Fel: GPU-minnet racker inte till.", file=sys.stderr)
+            print(f"  Forslag:", file=sys.stderr)
+            print(f"    --compute-type int8    (halverar minnesanvandning)", file=sys.stderr)
+            print(f"    -m medium              (mindre modell)", file=sys.stderr)
+            print(f"    -m small               (minsta brukbara modell)", file=sys.stderr)
+            return False
+        raise
 
     output_path.write_text("\n".join(srt_lines), encoding="utf-8")
 
@@ -492,14 +570,9 @@ def translate_subtitles(srt_path: Path, target_lang: str, api_key: str,
 
 
 def process_file(video_path: Path, force: bool, model: str,
-                 language: str | None, only_whisper: bool = False) -> bool:
+                 language: str | None, only_whisper: bool = False,
+                 whisper_model=None, compute_type: str = "int8") -> bool:
     """Behandla en videofil - extrahera eller transkribera undertexter."""
-    output_path = video_path.parent / (video_path.stem + ".en.srt")
-
-    if output_path.exists() and not force:
-        print(f"  Finns redan: {output_path.name} (anvand --force for att skriva over)")
-        return True
-
     print(f"\nBehandlar: {video_path.name}")
 
     if not only_whisper:
@@ -507,7 +580,11 @@ def process_file(video_path: Path, force: bool, model: str,
         streams = ffprobe_subtitle_streams(video_path)
         if streams:
             codec = streams[0].get("codec_name", "okant")
-            lang = streams[0].get("tags", {}).get("language", "okant")
+            lang = streams[0].get("tags", {}).get("language", "und")
+            output_path = video_path.parent / (video_path.stem + f".{lang}.srt")
+            if output_path.exists() and not force:
+                print(f"  Finns redan: {output_path.name}")
+                return True
             print(f"  Hittade inbaddad undertext: {codec} ({lang})")
             print(f"  Extraherar till: {output_path.name}")
             return extract_subtitles(video_path, output_path)
@@ -515,8 +592,17 @@ def process_file(video_path: Path, force: bool, model: str,
     else:
         print(f"  Startar Whisper-transkribering (--only-whisper)")
 
-    print(f"  Sparar till: {output_path.name}")
-    return transcribe_with_whisper(video_path, output_path, model, language)
+    # Om sprak angivet: bestam output-sokvag direkt, annars auto-detect
+    if language:
+        output_path = video_path.parent / (video_path.stem + f".{language}.srt")
+        if output_path.exists() and not force:
+            print(f"  Finns redan: {output_path.name}")
+            return True
+    else:
+        output_path = None  # Bestams av detekterat sprak
+
+    return transcribe_with_whisper(video_path, output_path, model, language,
+                                   whisper_model, force, compute_type)
 
 
 def main():
@@ -536,6 +622,11 @@ def main():
         "-m", "--model",
         default="large-v3",
         help="Whisper-modell (default: large-v3)"
+    )
+    parser.add_argument(
+        "--compute-type",
+        default="int8",
+        help="Whisper-berakningstyp: int8, float16, float32 (default: int8)"
     )
     parser.add_argument(
         "--force",
@@ -578,6 +669,12 @@ def main():
         help="Claude-modell for oversattning (default: claude-haiku-4-5-20251001)"
     )
     args = parser.parse_args()
+
+    # Kontrollera beroenden baserat pa lage
+    if args.sync:
+        check_dependencies(needs_ffmpeg=True, needs_sync=True)
+    elif not args.opensubtitles and not args.translate_subs:
+        check_dependencies(needs_ffmpeg=True, needs_whisper=args.only_whisper)
 
     target = Path(args.path)
 
@@ -666,7 +763,7 @@ def main():
         if target.suffix.lower() not in VIDEO_EXTENSIONS:
             print(f"Varning: {target.suffix} ar inte en kand videofiltyp", file=sys.stderr)
         success = process_file(target, args.force, args.model, args.language,
-                               args.only_whisper)
+                               args.only_whisper, compute_type=args.compute_type)
         sys.exit(0 if success else 1)
 
     elif target.is_dir():
@@ -679,11 +776,20 @@ def main():
             sys.exit(1)
 
         print(f"Hittade {len(video_files)} videofiler i: {target}")
+
+        # Ladda Whisper-modell en gang for batch-lage
+        whisper_model = None
+        try:
+            from faster_whisper import WhisperModel
+            whisper_model = _load_whisper_model(WhisperModel, args.model, args.compute_type)
+        except ImportError:
+            pass  # Hanteras per fil om Whisper behovs
+
         ok = 0
         fail = 0
         for vf in video_files:
             if process_file(vf, args.force, args.model, args.language,
-                            args.only_whisper):
+                            args.only_whisper, whisper_model, args.compute_type):
                 ok += 1
             else:
                 fail += 1
