@@ -66,7 +66,7 @@ set -Ux HF_TOKEN "hf_..."
 [Environment]::SetEnvironmentVariable("HF_TOKEN", "hf_...", "User")
 ```
 
-### OpenSubtitles - for `--opensubtitles`
+### OpenSubtitles - for subtitle downloads
 
 1. Create an account at [opensubtitles.com](https://www.opensubtitles.com/)
 2. Go to [API consumers](https://www.opensubtitles.com/en/consumers) and register an app
@@ -89,21 +89,30 @@ set -Ux OPENSUBTITLES_PASSWORD "your-password"
 [Environment]::SetEnvironmentVariable("OPENSUBTITLES_PASSWORD", "your-password", "User")
 ```
 
-The API key is required for searching. Username and password are needed for downloading
-(the API requires authentication for downloads).
+All three are required. When configured, OpenSubtitles downloading is automatically
+included in the default processing pipeline (extract → download → whisper).
 
 ## Usage
 
-### Extract or transcribe
+### Default processing order
+
+When you run `python subtitle_tool.py video.mkv`, the tool tries these steps in order:
+
+1. **Extract** embedded subtitles from the video file
+2. **Download** from OpenSubtitles.com (if credentials are configured)
+   - Auto-syncs to video audio when hash doesn't match
+3. **Transcribe** with Whisper (as a last resort)
+
+Directories are searched recursively, so you can point it at a whole library.
 
 ```bash
-# Single file - extracts embedded subs, otherwise uses Whisper
+# Single file
 python subtitle_tool.py video.mkv
 
-# All video files in a directory
-python subtitle_tool.py /path/to/videos/
+# Entire library (recursive)
+python subtitle_tool.py /path/to/movies/
 
-# Force Whisper (skip embedded subtitle check)
+# Force Whisper, skip extract and download steps
 python subtitle_tool.py --only-whisper video.mkv
 
 # Specify language and model
@@ -147,18 +156,22 @@ The source language is detected from the filename (e.g., `.en.srt` = English).
 ### Download from OpenSubtitles.com
 
 Downloads both Swedish (.sv.srt) and English (.en.srt) subtitles.
-Requires `OPENSUBTITLES_API_KEY` (see above).
+Requires OpenSubtitles credentials (see above).
+
+OpenSubtitles downloading is automatically included in the default processing order
+when credentials are configured. You can also run it standalone:
 
 ```bash
-# Single file
+# Download only (no extract/whisper)
 python subtitle_tool.py --opensubtitles video.mkv
 
-# Batch - all files in a directory
+# Batch - all files in a directory (recursive)
 python subtitle_tool.py --opensubtitles /path/to/videos/
 ```
 
-If the file hash matches on OpenSubtitles, subtitles are downloaded automatically.
-If the hash does not match, a warning is shown and you can choose to download or skip.
+If the file hash matches on OpenSubtitles, subtitles are downloaded directly.
+If the hash does not match, subtitles are downloaded and automatically synced
+to the video audio via ffsubsync.
 
 ### Sync subtitles
 

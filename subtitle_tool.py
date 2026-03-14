@@ -578,75 +578,69 @@ def opensubtitles_hash(file_path: Path) -> str:
     return f"{hash_val:016x}"
 
 
+def _opensubtitles_request(api_key: str, url: str, data: bytes | None = None,
+                           token: str | None = None) -> dict | None:
+    """Make an OpenSubtitles API request with retry on rate limit."""
+    headers = {
+        "Api-Key": api_key,
+        "User-Agent": "subtitle-tool v1.0",
+    }
+    if data:
+        headers["Content-Type"] = "application/json"
+        headers["Accept"] = "application/json"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    for attempt in range(1, 4):
+        req = urllib.request.Request(url, data=data, headers=headers)
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                # Read retry-after header or default to 2s * attempt
+                retry_after = int(e.headers.get("Retry-After", attempt * 2))
+                print(f"  {C_YELLOW}Rate limited - waiting {retry_after}s...{C_RESET}")
+                time.sleep(retry_after)
+                continue
+            print(f"  {C_RED}OpenSubtitles API error:{C_RESET} {e.code} {e.reason}",
+                  file=sys.stderr)
+            if e.code == 401:
+                print(f"  Set OPENSUBTITLES_USERNAME and OPENSUBTITLES_PASSWORD",
+                      file=sys.stderr)
+            return None
+        except urllib.error.URLError as e:
+            print(f"  {C_RED}Network error:{C_RESET} {e.reason}", file=sys.stderr)
+            return None
+
+    print(f"  {C_RED}Rate limit exceeded, try again later{C_RESET}", file=sys.stderr)
+    return None
+
+
 def _opensubtitles_search(api_key: str, **params) -> list[dict]:
     """Search the OpenSubtitles API."""
     base_url = "https://api.opensubtitles.com/api/v1/subtitles"
     query_str = urllib.parse.urlencode(params)
     url = f"{base_url}?{query_str}"
-
-    req = urllib.request.Request(url, headers={
-        "Api-Key": api_key,
-        "User-Agent": "subtitle-tool v1.0",
-    })
-
-    try:
-        with urllib.request.urlopen(req) as resp:
-            data = json.loads(resp.read().decode())
-        return data.get("data", [])
-    except urllib.error.HTTPError as e:
-        print(f"  OpenSubtitles API error: {e.code} {e.reason}", file=sys.stderr)
-        return []
-    except urllib.error.URLError as e:
-        print(f"  Network error: {e.reason}", file=sys.stderr)
-        return []
+    data = _opensubtitles_request(api_key, url)
+    return data.get("data", []) if data else []
 
 
 def _opensubtitles_login(api_key: str, username: str, password: str) -> str | None:
     """Login to OpenSubtitles and return a JWT token."""
     url = "https://api.opensubtitles.com/api/v1/login"
-    req_data = json.dumps({"username": username, "password": password}).encode()
-    req = urllib.request.Request(url, data=req_data, headers={
-        "Api-Key": api_key,
-        "User-Agent": "subtitle-tool v1.0",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    })
-
-    try:
-        with urllib.request.urlopen(req) as resp:
-            data = json.loads(resp.read().decode())
-        return data.get("token")
-    except urllib.error.HTTPError as e:
-        print(f"  {C_RED}OpenSubtitles login failed:{C_RESET} {e.code} {e.reason}",
-              file=sys.stderr)
-        return None
-    except urllib.error.URLError as e:
-        print(f"  {C_RED}Network error:{C_RESET} {e.reason}", file=sys.stderr)
-        return None
+    body = json.dumps({"username": username, "password": password}).encode()
+    data = _opensubtitles_request(api_key, url, data=body)
+    return data.get("token") if data else None
 
 
 def _opensubtitles_download(file_id: int, output_path: Path, api_key: str,
                             token: str | None = None) -> bool:
     """Download a subtitle file from OpenSubtitles.com."""
     url = "https://api.opensubtitles.com/api/v1/download"
-    req_data = json.dumps({"file_id": file_id}).encode()
-    headers = {
-        "Api-Key": api_key,
-        "User-Agent": "subtitle-tool v1.0",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(url, data=req_data, headers=headers)
-
-    try:
-        with urllib.request.urlopen(req) as resp:
-            dl_data = json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        print(f"  {C_RED}Download error:{C_RESET} {e.code} {e.reason}", file=sys.stderr)
-        if e.code == 401:
-            print(f"  Set OPENSUBTITLES_USERNAME and OPENSUBTITLES_PASSWORD", file=sys.stderr)
+    body = json.dumps({"file_id": file_id}).encode()
+    dl_data = _opensubtitles_request(api_key, url, data=body, token=token)
+    if not dl_data:
         return False
 
     dl_link = dl_data.get("link")
@@ -1077,6 +1071,7 @@ def main():
             print(f"Found {C_BOLD}{len(video_files)}{C_RESET} video files in: {target}")
             for vf in video_files:
                 fetch_opensubtitles(vf, os_api_key, args.force, os_token)
+                time.sleep(1)  # Rate limit courtesy
             sys.exit(0)
         else:
             print(f"Path not found: {target}", file=sys.stderr)
