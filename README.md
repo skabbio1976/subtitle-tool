@@ -195,10 +195,45 @@ python subtitle_tool.py video.mkv --sync subtitle.srt
 python subtitle_tool.py video.mkv --sync subtitle.srt -o synced.srt
 ```
 
-## Building a standalone binary
+## Installation with uv (recommended)
 
-If you don't want to install Python and dependencies globally, you can build a
-single executable with PyInstaller:
+The easiest way to run subtitle_tool is with [uv](https://docs.astral.sh/uv/).
+No venv, no pip install — uv reads the inline dependency metadata from the
+script's shebang and handles everything automatically.
+
+1. Install uv:
+
+```bash
+# Linux / macOS
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Windows (PowerShell)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# Or via package managers
+pacman -S python-uv          # Arch / CachyOS
+brew install uv               # macOS
+```
+
+2. Make the script executable and run it directly:
+
+```bash
+chmod +x subtitle_tool.py
+./subtitle_tool.py --help
+
+# Or copy/symlink to PATH
+sudo cp subtitle_tool.py /usr/local/bin/subtitle_tool
+subtitle_tool video.mkv
+```
+
+On first run, uv automatically downloads the correct Python version (if needed)
+and installs all dependencies into a cached environment. Works on Linux, macOS,
+and Windows.
+
+## Building a standalone binary (alternative)
+
+If you prefer a single executable without requiring uv or Python on the target
+machine, you can build one with PyInstaller:
 
 ```bash
 # Create a venv and install everything
@@ -219,7 +254,7 @@ pyinstaller --onefile subtitle_tool.py
 > **Note:** The binary will be large (~300-500 MB) because it bundles the Python
 > runtime and all dependencies including CUDA/cuDNN libraries from faster-whisper.
 > Whisper model files are **not** included — they are downloaded on first run.
-> ffmpeg/ffprobe must still be installed separately on the system.
+> ffmpeg/ffprobe and ffsubsync must still be installed separately on the system.
 
 ## Supported formats
 

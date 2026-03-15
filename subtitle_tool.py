@@ -1,4 +1,14 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "faster-whisper",
+#     "ffsubsync",
+#     "setuptools<81",
+#     "nvidia-cublas-cu12",
+#     "nvidia-cudnn-cu12",
+# ]
+# ///
 """Extract, transcribe, translate, or sync subtitles for video files.
 
 Checks for embedded SRT subtitles first and extracts them.
@@ -24,7 +34,7 @@ from pathlib import Path
 
 
 def _setup_cuda_paths():
-    """Add pip-installed NVIDIA libraries to LD_LIBRARY_PATH.
+    """Add pip-installed NVIDIA libraries to LD_LIBRARY_PATH and pre-load them.
 
     Needed when the system CUDA version (e.g. 13) does not match
     the version ctranslate2/faster-whisper was built against (CUDA 12).
@@ -44,9 +54,19 @@ def _setup_cuda_paths():
     if not lib_paths:
         return
 
+    # Set LD_LIBRARY_PATH for subprocesses
     existing = os.environ.get("LD_LIBRARY_PATH", "")
     new = ":".join(lib_paths)
     os.environ["LD_LIBRARY_PATH"] = f"{new}:{existing}" if existing else new
+
+    # Pre-load CUDA libraries so ctranslate2 can find them via dlopen
+    import ctypes
+    for lib_dir in lib_paths:
+        for so_file in sorted(Path(lib_dir).glob("*.so*")):
+            try:
+                ctypes.CDLL(str(so_file), mode=ctypes.RTLD_GLOBAL)
+            except OSError:
+                pass
 
 
 _setup_cuda_paths()
@@ -106,12 +126,8 @@ def sync_subtitles(video_path: Path, srt_path: Path, output_path: Path | None) -
     if output_path != srt_path:
         print(f"  Saving to: {C_CYAN}{output_path.name}{C_RESET}")
 
-    cmd = [
-        "ffsubsync",
-        str(video_path),
-        "-i", str(srt_path),
-        "-o", str(output_path),
-    ]
+    cmd = ["ffsubsync"]
+    cmd += [str(video_path), "-i", str(srt_path), "-o", str(output_path)]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         print(f"  {C_RED}Sync error:{C_RESET} {result.stderr.strip()}", file=sys.stderr)
@@ -526,7 +542,15 @@ LANG_NAMES = {
 
 def parse_srt(srt_path: Path) -> list[dict]:
     """Parse an SRT file into a list of {index, start, end, text}."""
-    content = srt_path.read_text(encoding="utf-8-sig")  # Handles BOM
+    # Try UTF-8 first, fall back to common encodings for older subtitle files
+    for enc in ("utf-8-sig", "latin-1"):
+        try:
+            content = srt_path.read_text(encoding=enc)
+            break
+        except (UnicodeDecodeError, ValueError):
+            continue
+    else:
+        raise UnicodeDecodeError("utf-8", b"", 0, 1, f"Cannot decode {srt_path}")
     segments = []
     blocks = content.strip().split("\n\n")
 
@@ -683,13 +707,14 @@ def fetch_opensubtitles(video_path: Path, api_key: str, force: bool = False,
     print(f"  Hash: {C_DIM}{file_hash}{C_RESET}")
 
     languages = {"en": "English", "sv": "Swedish"}
-    any_downloaded = False
+    any_found = False
 
     for lang, lang_name in languages.items():
         output_path = video_path.parent / (video_path.stem + f".{lang}.srt")
 
         if output_path.exists() and not force:
             print(f"  {C_YELLOW}{lang_name} already exists:{C_RESET} {output_path.name}")
+            any_found = True
             continue
 
         # Search by hash
@@ -711,7 +736,7 @@ def fetch_opensubtitles(video_path: Path, api_key: str, force: bool = False,
             print(f"  {C_GREEN}{lang_name} (hash OK):{C_RESET} {release}")
             if _opensubtitles_download(file_id, output_path, api_key, token):
                 print(f"  {C_GREEN}Saved:{C_RESET} {output_path.name}")
-                any_downloaded = True
+                any_found = True
         elif non_hash:
             best = non_hash[0]
             attrs = best["attributes"]
@@ -722,11 +747,11 @@ def fetch_opensubtitles(video_path: Path, api_key: str, force: bool = False,
                 print(f"  {C_GREEN}Saved:{C_RESET} {output_path.name}")
                 print(f"  {C_CYAN}Auto-syncing to video...{C_RESET}")
                 sync_subtitles(video_path, output_path, None)
-                any_downloaded = True
+                any_found = True
         else:
             print(f"  {C_DIM}No {lang_name} subtitle found{C_RESET}")
 
-    return any_downloaded
+    return any_found
 
 
 def translate_batch_claude(texts: list[str], source_lang: str, target_lang: str,
@@ -1174,4 +1199,6 @@ def main():
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()
