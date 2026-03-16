@@ -2,10 +2,10 @@
 
 ## Translation quality
 
-- [ ] Undersök för snabba texter — vissa översatta subtitles visas för kort tid relativt textmängden
-- [ ] Svensk översättning hamnar ur sync — misstänkt orsak: post-processing (`_split_long_segment` / `_merge_short_segments`) ändrar antal segment/timing efter översättning
-- [ ] Överväg att skippa eller förenkla post-processing för översatta filer (de har redan korrekt timing från källan)
-- [ ] Validera att antal rader in == antal rader ut efter översättning (Claude-batchen har fallback men den kan maska problem)
-- [ ] Undersök att låta Haiku sköta post-processing via prompt istället för regex/kod — mer flexibelt, kan hantera radlängd, naturlig svenska, timing-awareness
-- [ ] Lägg till växel (t.ex. `--quality`) för att välja Haiku-postprocessing vs snabb regex — regex som default för batch/speed, Haiku för kvalitet på enstaka filer
-- Testfil: `/media/win/big/tv/Dallas(1978)/Dallas S09E26 Nothing's Ever Perfect/`
+- [ ] Investigate too-fast text — some translated subtitles display for too short a time relative to the amount of text
+- [ ] Swedish translation goes out of sync — suspected cause: post-processing (`_split_long_segment` / `_merge_short_segments`) changes segment count/timing after translation
+- [ ] Consider skipping or simplifying post-processing for translated files (they already have correct timing from the source)
+- [ ] Validate that line count in == line count out after translation (the Claude batch has a fallback but it can mask problems)
+- [ ] Investigate letting Haiku handle post-processing via prompt instead of regex/code — more flexible, can handle line length, natural Swedish, timing-awareness
+- [ ] Add a flag (e.g. `--quality`) to choose Haiku post-processing vs fast regex — regex as default for batch/speed, Haiku for quality on individual files
+- Test file: `/media/win/big/tv/Dallas(1978)/Dallas S09E26 Nothing's Ever Perfect/`
