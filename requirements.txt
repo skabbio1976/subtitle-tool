@@ -3,5 +3,6 @@ ffsubsync
 setuptools<81
 nvidia-cublas-cu12
 nvidia-cudnn-cu12
+torch
 transformers
 sentencepiece

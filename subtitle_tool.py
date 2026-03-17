@@ -7,6 +7,7 @@
 #     "setuptools<81",
 #     "nvidia-cublas-cu12",
 #     "nvidia-cudnn-cu12",
+#     "torch",
 #     "transformers",
 #     "sentencepiece",
 # ]
@@ -33,6 +34,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+# Prevent NVBLAS crash when no GPU is available (affects torch on some systems)
+if "NVBLAS_CONFIG_FILE" not in os.environ:
+    _nvblas_conf = os.path.join(tempfile.gettempdir(), "subtitle_tool_nvblas.conf")
+    if not os.path.exists(_nvblas_conf):
+        with open(_nvblas_conf, "w") as _f:
+            _f.write("NVBLAS_CPU_BLAS_LIB libblas.so\n")
+    os.environ["NVBLAS_CONFIG_FILE"] = _nvblas_conf
 
 
 def _setup_cuda_paths():
@@ -1010,7 +1019,8 @@ def _parse_numbered_response(response: str, expected_count: int,
     return output
 
 
-_helsinki_pipeline = None
+_helsinki_model = None
+_helsinki_tokenizer = None
 
 
 def translate_batch_helsinki(texts: list[str], source_lang: str,
@@ -1021,22 +1031,36 @@ def translate_batch_helsinki(texts: list[str], source_lang: str,
     Quality is basic machine translation — no context awareness or idiom
     handling, but works well for straightforward dialogue.
     """
-    global _helsinki_pipeline
-    if _helsinki_pipeline is None:
+    global _helsinki_model, _helsinki_tokenizer
+    if _helsinki_model is None:
         try:
-            from transformers import pipeline as hf_pipeline
+            from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
         except ImportError:
             print(f"  {C_RED}Error: transformers not installed.{C_RESET}", file=sys.stderr)
-            print(f"  Run: {C_BOLD}pip install transformers sentencepiece{C_RESET}", file=sys.stderr)
+            print(f"  Run: {C_BOLD}pip install transformers sentencepiece torch{C_RESET}", file=sys.stderr)
             raise
+        import logging
+        import torch
+        logging.getLogger("transformers").setLevel(logging.ERROR)
         model_name = f"Helsinki-NLP/opus-mt-{source_lang}-{target_lang}"
         print(f"  {C_DIM}Loading {model_name}...{C_RESET}")
-        _helsinki_pipeline = hf_pipeline("translation", model=model_name)
+        _helsinki_tokenizer = AutoTokenizer.from_pretrained(model_name)
+        _helsinki_model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+        _helsinki_model.eval()
 
-    # Flatten multi-line entries and translate
+    # Flatten multi-line entries and translate in batches
     flat_texts = [t.replace("\n", " ").strip() for t in texts]
-    results = _helsinki_pipeline(flat_texts, batch_size=32)
-    return [r["translation_text"] for r in results]
+    translated = []
+    batch_size = 16
+    for i in range(0, len(flat_texts), batch_size):
+        chunk = flat_texts[i:i + batch_size]
+        inputs = _helsinki_tokenizer(chunk, return_tensors="pt", padding=True,
+                                     truncation=True, max_length=512)
+        with torch.no_grad():
+            outputs = _helsinki_model.generate(**inputs, max_length=512)
+        translated.extend(_helsinki_tokenizer.batch_decode(outputs,
+                                                           skip_special_tokens=True))
+    return translated
 
 
 def translate_batch_ollama(texts: list[str], source_lang: str,
