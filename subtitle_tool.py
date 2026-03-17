@@ -234,6 +234,44 @@ _HALLUCINATION_RE = re.compile(
 _MAX_LINE_CHARS = 42
 
 
+def _wrap_subtitle_line(text: str, max_chars: int = _MAX_LINE_CHARS) -> str:
+    """Wrap a subtitle line to max 2 lines, balanced around the middle.
+
+    Unlike _split_long_segment this does NOT change segment count or timing —
+    it only inserts a newline for display purposes.
+    """
+    text = text.strip()
+    if len(text) <= max_chars:
+        return text
+
+    # Already two lines? Check if each fits
+    if "\n" in text:
+        lines = text.split("\n")
+        if all(len(l) <= max_chars for l in lines) and len(lines) <= 2:
+            return text
+
+    # Flatten and find best split point near the middle
+    flat = text.replace("\n", " ")
+    mid = len(flat) / 2
+    best_pos = -1
+    best_diff = len(flat)
+
+    for i, ch in enumerate(flat):
+        if ch == ' ':
+            diff = abs(i - mid)
+            if diff < best_diff:
+                best_diff = diff
+                best_pos = i
+
+    if best_pos > 0:
+        line1 = flat[:best_pos].rstrip()
+        line2 = flat[best_pos + 1:].lstrip()
+        if len(line1) <= max_chars and len(line2) <= max_chars:
+            return f"{line1}\n{line2}"
+
+    return flat
+
+
 def _is_hallucination(text: str, duration: float = 0) -> bool:
     """Check if a segment looks like a Whisper hallucination."""
     if _HALLUCINATION_RE.match(text):
@@ -341,16 +379,23 @@ def _merge_short_segments(segments: list[tuple]) -> list[tuple]:
 
 def _run_whisper(whisper_model, wav_path: str, video_path: Path,
                  output_path: Path | None, force: bool,
-                 language: str | None) -> tuple[bool, list[str], Path | None]:
+                 language: str | None,
+                 coherent: bool = False) -> tuple[bool, list[str], Path | None]:
     """Run Whisper transcription. Returns (already_exists, srt_lines, output_path).
 
     Raises RuntimeError on CUDA issues (OOM, missing libraries).
+    If coherent=True, enables condition_on_previous_text with safeguards
+    for better coherence at the cost of potential hallucination loops.
     """
     kwargs = {
-        "condition_on_previous_text": False,  # Prevent hallucination loops
+        "condition_on_previous_text": coherent,
         "no_speech_threshold": 0.6,
         "hallucination_silence_threshold": 2,  # Skip silent segments >2s
     }
+    if coherent:
+        kwargs["compression_ratio_threshold"] = 2.4
+        kwargs["log_prob_threshold"] = -1.0
+        kwargs["repetition_penalty"] = 1.1
     if language:
         kwargs["language"] = language
 
@@ -441,7 +486,8 @@ def transcribe_with_whisper(video_path: Path, output_path: Path | None,
                             model_name: str, language: str | None,
                             whisper_model=None, force: bool = False,
                             compute_type: str = "int8",
-                            device: str = "auto") -> bool:
+                            device: str = "auto",
+                            coherent: bool = False) -> bool:
     """Transcribe audio with faster-whisper and save as SRT.
 
     If output_path is None, the filename is determined from the detected language.
@@ -479,7 +525,8 @@ def transcribe_with_whisper(video_path: Path, output_path: Path | None,
 
     try:
         already_exists, srt_lines, output_path = _run_whisper(
-            whisper_model, wav_path, video_path, output_path, force, language
+            whisper_model, wav_path, video_path, output_path, force, language,
+            coherent=coherent
         )
         if already_exists:
             Path(wav_path).unlink(missing_ok=True)
@@ -502,7 +549,8 @@ def transcribe_with_whisper(video_path: Path, output_path: Path | None,
                     WhisperModel, model_name, cpu_type, "cpu"
                 )
                 already_exists, srt_lines, output_path = _run_whisper(
-                    whisper_model, wav_path, video_path, output_path, force, language
+                    whisper_model, wav_path, video_path, output_path, force, language,
+                    coherent=coherent
                 )
                 if already_exists:
                     Path(wav_path).unlink(missing_ok=True)
@@ -538,6 +586,89 @@ LANG_NAMES = {
     "fi": "Finnish", "de": "German", "fr": "French", "es": "Spanish",
     "it": "Italian", "pt": "Portuguese", "ja": "Japanese", "zh": "Chinese",
 }
+
+
+def _srt_ts_to_seconds(ts: str) -> float:
+    """Convert SRT timestamp '01:02:03,456' to seconds."""
+    h, m, rest = ts.split(":")
+    s, ms = rest.split(",")
+    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+
+
+def _preprocess_for_translation(segments: list[dict]) -> list[dict]:
+    """Merge mid-sentence fragments before sending to translation.
+
+    Many SRT files split a single sentence across 2-3 entries with
+    tiny gaps (< 150ms). This merges them back so the translator
+    sees complete thoughts.
+    """
+    if not segments:
+        return segments
+
+    merged = []
+    for seg in segments:
+        text = seg["text"].replace("\n", " ").strip()
+
+        if merged:
+            prev = merged[-1]
+            gap = (_srt_ts_to_seconds(seg["start"])
+                   - _srt_ts_to_seconds(prev["end"]))
+            prev_text = prev["text"]
+
+            # Merge if: tiny gap + previous doesn't end a sentence + short fragment
+            should_merge = (
+                gap < 0.15
+                and prev_text
+                and prev_text[-1] not in '.!?"\')'
+                and (len(text.split()) <= 3 or text[0].islower())
+            )
+
+            if should_merge:
+                prev["text"] = f"{prev_text} {text}"
+                prev["end"] = seg["end"]
+                continue
+
+        merged.append({**seg, "text": text})
+
+    return merged
+
+
+def _split_into_scene_batches(segments: list[dict],
+                              gap_threshold: float = 4.0,
+                              max_batch: int = 200) -> list[list[int]]:
+    """Split subtitle segments into scene-based batches.
+
+    Groups segments by natural scene boundaries (time gaps > gap_threshold).
+    Small scenes are merged together until max_batch is reached, but a scene
+    is never split across batches.
+
+    Returns list of index-lists (indices into the segments list).
+    """
+    if not segments:
+        return []
+
+    # Step 1: identify scene boundaries
+    scenes: list[list[int]] = [[0]]
+    for i in range(1, len(segments)):
+        gap = (_srt_ts_to_seconds(segments[i]["start"])
+               - _srt_ts_to_seconds(segments[i - 1]["end"]))
+        if gap > gap_threshold:
+            scenes.append([i])
+        else:
+            scenes[-1].append(i)
+
+    # Step 2: merge small scenes into batches without breaking scenes
+    batches: list[list[int]] = []
+    current: list[int] = []
+    for scene in scenes:
+        if current and len(current) + len(scene) > max_batch:
+            batches.append(current)
+            current = []
+        current.extend(scene)
+    if current:
+        batches.append(current)
+
+    return batches
 
 
 def parse_srt(srt_path: Path) -> list[dict]:
@@ -766,19 +897,33 @@ def translate_batch_claude(texts: list[str], source_lang: str, target_lang: str,
     )
 
     prompt = (
-        f"Translate the following numbered subtitle lines from {source_name} "
-        f"to {target_name}.\n"
+        f"Translate these subtitle lines from {source_name} to {target_name}.\n\n"
         f"Rules:\n"
-        f"- Return ONLY the translations, numbered exactly like the input.\n"
-        f"- Preserve the original meaning and tone.\n"
-        f"- Keep proper nouns unchanged.\n"
-        f"- Do not add explanations or notes.\n\n"
+        f"- Return ONLY numbered translations, matching input numbering exactly.\n"
+        f"- This is spoken dialogue from a film/TV show. Use natural, "
+        f"colloquial {target_name} appropriate for the tone.\n"
+        f"- Adapt idioms and slang to equivalent {target_name} expressions "
+        f"rather than translating literally.\n"
+        f"- Keep proper nouns, place names, and titles unchanged.\n"
+        f"- Keep each line under 42 characters when possible (subtitle display limit).\n"
+        f"- Do not add explanations, notes, or commentary.\n\n"
         f"{numbered}"
     )
 
     body = json.dumps({
         "model": model,
         "max_tokens": 8192,
+        "temperature": 0.3,
+        "system": (
+            "You are an expert subtitle translator for film and television. "
+            "You produce natural, idiomatic translations that sound like "
+            "real spoken dialogue — not written text. "
+            "You match the register and tone of each character: "
+            "slang stays slang, formal stays formal. "
+            "You adapt idioms to equivalent expressions in the target language "
+            "rather than translating literally. "
+            "You never explain, add notes, or deviate from the numbered format."
+        ),
         "messages": [{"role": "user", "content": prompt}],
     }).encode()
 
@@ -823,21 +968,44 @@ def translate_batch_claude(texts: list[str], source_lang: str, target_lang: str,
             raise
 
     response_text = data["content"][0]["text"]
+    return _parse_numbered_response(response_text, len(texts), texts)
 
-    # Parse numbered response
-    result = []
-    for line in response_text.strip().split("\n"):
+
+def _parse_numbered_response(response: str, expected_count: int,
+                             fallback_texts: list[str]) -> list[str]:
+    """Parse numbered translation response with fallback strategies.
+
+    Handles variants: "N: text", "N. text", "N) text", "N - text".
+    Falls back to original text for missing lines.
+    """
+    lines = response.strip().split("\n")
+    result = {}
+
+    for line in lines:
         line = line.strip()
         if not line:
             continue
-        # Strip "N: " prefix
-        colon_pos = line.find(": ")
-        if colon_pos != -1 and colon_pos < 6 and line[:colon_pos].isdigit():
-            result.append(line[colon_pos + 2:])
-        else:
-            result.append(line)
+        m = re.match(r'^(\d+)\s*[.:)\-]\s*(.*)', line)
+        if m:
+            idx = int(m.group(1))
+            text = m.group(2).strip()
+            if text:
+                result[idx] = text
 
-    return result
+    output = []
+    missing = []
+    for i in range(1, expected_count + 1):
+        if i in result:
+            output.append(result[i])
+        else:
+            missing.append(i)
+            output.append(fallback_texts[i - 1] if i - 1 < len(fallback_texts) else "")
+
+    if missing:
+        print(f"  {C_YELLOW}Warning: {len(missing)} line(s) missing from response, "
+              f"kept original: {missing[:10]}{'...' if len(missing) > 10 else ''}{C_RESET}")
+
+    return output
 
 
 def _translate_output_path(srt_path: Path, target_lang: str) -> Path:
@@ -866,6 +1034,12 @@ def translate_subtitles(srt_path: Path, target_lang: str, api_key: str,
         print("  No subtitles to translate", file=sys.stderr)
         return False
 
+    # Merge mid-sentence fragments for better translation context
+    original_count = len(segments)
+    segments = _preprocess_for_translation(segments)
+    if len(segments) < original_count:
+        print(f"  Merged {original_count - len(segments)} fragment(s)")
+
     # Detect source language from filename
     stem_parts = srt_path.stem.rsplit(".", 1)
     if len(stem_parts) == 2 and len(stem_parts[1]) == 2 and stem_parts[1].isalpha():
@@ -878,15 +1052,14 @@ def translate_subtitles(srt_path: Path, target_lang: str, api_key: str,
     print(f"  Model: {C_DIM}{model}{C_RESET}")
     print(f"  Subtitle count: {C_BOLD}{len(segments)}{C_RESET}")
 
-    # Translate in batches to stay within API output token limits and avoid timeouts
-    batch_size = 200
+    # Split into scene-based batches (never breaks mid-scene)
     all_texts = [s["text"] for s in segments]
-    translated_texts = []
-    total_batches = (len(all_texts) + batch_size - 1) // batch_size
+    batches = _split_into_scene_batches(segments, gap_threshold=4.0, max_batch=200)
+    total_batches = len(batches)
+    translated_texts = [""] * len(all_texts)
 
-    for batch_idx in range(0, len(all_texts), batch_size):
-        batch = all_texts[batch_idx:batch_idx + batch_size]
-        batch_num = batch_idx // batch_size + 1
+    for batch_num, indices in enumerate(batches, 1):
+        batch = [all_texts[i] for i in indices]
 
         if total_batches > 1:
             print(f"  {C_CYAN}Translating batch {batch_num}/{total_batches} ({len(batch)} lines)...{C_RESET}")
@@ -909,20 +1082,21 @@ def translate_subtitles(srt_path: Path, target_lang: str, api_key: str,
                 result.append(batch[len(result)])
             result = result[:len(batch)]
 
-        translated_texts.extend(result)
+        for idx, text in zip(indices, result):
+            translated_texts[idx] = text
 
         # Small delay between batches to respect rate limits
         if batch_num < total_batches:
             time.sleep(2)
 
-    # Build output segments with original timestamps
+    # Build output segments with original timestamps (wrap long lines for display)
     output_segments = []
     for seg, text in zip(segments, translated_texts):
         output_segments.append({
             "index": seg["index"],
             "start": seg["start"],
             "end": seg["end"],
-            "text": text,
+            "text": _wrap_subtitle_line(text),
         })
 
     write_srt(output_segments, output_path)
@@ -935,7 +1109,8 @@ def process_file(video_path: Path, force: bool, model: str,
                  whisper_model=None, compute_type: str = "int8",
                  device: str = "auto",
                  os_api_key: str | None = None,
-                 os_token: str | None = None) -> bool:
+                 os_token: str | None = None,
+                 coherent: bool = False) -> bool:
     """Process a video file - extract, download, or transcribe subtitles.
 
     Priority: 1) embedded subs, 2) OpenSubtitles, 3) Whisper transcription.
@@ -975,7 +1150,8 @@ def process_file(video_path: Path, force: bool, model: str,
         output_path = None  # Determined by detected language
 
     return transcribe_with_whisper(video_path, output_path, model, language,
-                                   whisper_model, force, compute_type, device)
+                                   whisper_model, force, compute_type, device,
+                                   coherent=coherent)
 
 
 def main():
@@ -1046,6 +1222,12 @@ def main():
         "--translate-model",
         default="claude-haiku-4-5-20251001",
         help="Claude model for translation (default: claude-haiku-4-5-20251001)"
+    )
+    parser.add_argument(
+        "--coherent",
+        action="store_true",
+        help="Enable Whisper coherence mode (condition_on_previous_text=True with "
+             "hallucination safeguards). Better for dialogue-heavy content."
     )
     args = parser.parse_args()
 
@@ -1157,7 +1339,8 @@ def main():
         success = process_file(target, args.force, args.model, args.language,
                                args.only_whisper, compute_type=args.compute_type,
                                device=args.device,
-                               os_api_key=os_api_key, os_token=os_token)
+                               os_api_key=os_api_key, os_token=os_token,
+                               coherent=args.coherent)
         sys.exit(0 if success else 1)
 
     elif target.is_dir():
@@ -1185,7 +1368,8 @@ def main():
         for vf in video_files:
             if process_file(vf, args.force, args.model, args.language,
                             args.only_whisper, whisper_model, args.compute_type,
-                            args.device, os_api_key, os_token):
+                            args.device, os_api_key, os_token,
+                            coherent=args.coherent):
                 ok += 1
             else:
                 fail += 1
