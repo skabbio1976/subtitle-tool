@@ -7,6 +7,8 @@
 #     "setuptools<81",
 #     "nvidia-cublas-cu12",
 #     "nvidia-cudnn-cu12",
+#     "transformers",
+#     "sentencepiece",
 # ]
 # ///
 """Extract, transcribe, translate, or sync subtitles for video files.
@@ -1008,6 +1010,107 @@ def _parse_numbered_response(response: str, expected_count: int,
     return output
 
 
+_helsinki_pipeline = None
+
+
+def translate_batch_helsinki(texts: list[str], source_lang: str,
+                            target_lang: str) -> list[str]:
+    """Translate a batch of subtitle lines using Helsinki-NLP/opus-mt.
+
+    Lightweight local translation (~300MB model). No GPU required.
+    Quality is basic machine translation — no context awareness or idiom
+    handling, but works well for straightforward dialogue.
+    """
+    global _helsinki_pipeline
+    if _helsinki_pipeline is None:
+        try:
+            from transformers import pipeline as hf_pipeline
+        except ImportError:
+            print(f"  {C_RED}Error: transformers not installed.{C_RESET}", file=sys.stderr)
+            print(f"  Run: {C_BOLD}pip install transformers sentencepiece{C_RESET}", file=sys.stderr)
+            raise
+        model_name = f"Helsinki-NLP/opus-mt-{source_lang}-{target_lang}"
+        print(f"  {C_DIM}Loading {model_name}...{C_RESET}")
+        _helsinki_pipeline = hf_pipeline("translation", model=model_name)
+
+    # Flatten multi-line entries and translate
+    flat_texts = [t.replace("\n", " ").strip() for t in texts]
+    results = _helsinki_pipeline(flat_texts, batch_size=32)
+    return [r["translation_text"] for r in results]
+
+
+def translate_batch_ollama(texts: list[str], source_lang: str,
+                           target_lang: str, model: str) -> list[str]:
+    """Translate a batch of subtitle lines using a local Ollama model.
+
+    Requires Ollama running locally (default: http://localhost:11434).
+    Good quality with context awareness when using scene-based batches.
+    """
+    source_name = LANG_NAMES.get(source_lang, source_lang)
+    target_name = LANG_NAMES.get(target_lang, target_lang)
+
+    numbered = "\n".join(
+        f"{i+1}: {t.replace(chr(10), ' ')}" for i, t in enumerate(texts)
+    )
+
+    prompt = (
+        f"Translate these subtitle lines from {source_name} to {target_name}.\n\n"
+        f"Rules:\n"
+        f"- Return ONLY numbered translations, matching input numbering exactly.\n"
+        f"- This is spoken dialogue from a film/TV show. Use natural, "
+        f"colloquial {target_name} appropriate for the tone.\n"
+        f"- Adapt idioms and slang to equivalent {target_name} expressions "
+        f"rather than translating literally.\n"
+        f"- Keep proper nouns, place names, and titles unchanged.\n"
+        f"- Keep each line under 42 characters when possible (subtitle display limit).\n"
+        f"- Do not add explanations, notes, or commentary.\n\n"
+        f"{numbered}"
+    )
+
+    system_msg = (
+        "You are an expert subtitle translator for film and television. "
+        "You produce natural, idiomatic translations that sound like "
+        "real spoken dialogue — not written text. "
+        "You match the register and tone of each character: "
+        "slang stays slang, formal stays formal. "
+        "You adapt idioms to equivalent expressions in the target language "
+        "rather than translating literally. "
+        "You never explain, add notes, or deviate from the numbered format."
+    )
+
+    body = json.dumps({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False,
+    }).encode()
+
+    ollama_url = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+    req = urllib.request.Request(
+        f"{ollama_url}/api/chat",
+        data=body,
+        headers={"content-type": "application/json"},
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            data = json.loads(resp.read().decode())
+    except urllib.error.URLError as e:
+        print(f"  {C_RED}Ollama connection error:{C_RESET} {e}", file=sys.stderr)
+        print(f"  Is Ollama running? Try: {C_BOLD}ollama serve{C_RESET}", file=sys.stderr)
+        raise
+    except Exception as e:
+        print(f"  {C_RED}Ollama error:{C_RESET} {e}", file=sys.stderr)
+        raise
+
+    response_text = data.get("message", {}).get("content", "")
+    # Strip <think>...</think> blocks (Qwen3 thinking mode)
+    response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL).strip()
+    return _parse_numbered_response(response_text, len(texts), texts)
+
+
 def _translate_output_path(srt_path: Path, target_lang: str) -> Path:
     """Determine output filename for translation."""
     stem = srt_path.stem
@@ -1019,8 +1122,12 @@ def _translate_output_path(srt_path: Path, target_lang: str) -> Path:
 
 
 def translate_subtitles(srt_path: Path, target_lang: str, api_key: str,
-                        model: str, force: bool) -> bool:
-    """Translate an SRT file to another language via the Claude API."""
+                        model: str, force: bool,
+                        backend: str = "claude") -> bool:
+    """Translate an SRT file to another language.
+
+    Backends: claude (Anthropic API), ollama (local LLM), helsinki (opus-mt).
+    """
     output_path = _translate_output_path(srt_path, target_lang)
 
     if output_path.exists() and not force:
@@ -1049,7 +1156,7 @@ def translate_subtitles(srt_path: Path, target_lang: str, api_key: str,
 
     target_name = LANG_NAMES.get(target_lang, target_lang)
     print(f"  Language: {C_BOLD}{source_lang} -> {target_lang}{C_RESET} ({target_name})")
-    print(f"  Model: {C_DIM}{model}{C_RESET}")
+    print(f"  Backend: {C_DIM}{backend}{C_RESET}" + (f" ({model})" if model else ""))
     print(f"  Subtitle count: {C_BOLD}{len(segments)}{C_RESET}")
 
     # Split into scene-based batches (never breaks mid-scene)
@@ -1067,9 +1174,14 @@ def translate_subtitles(srt_path: Path, target_lang: str, api_key: str,
             print(f"  {C_CYAN}Translating {len(batch)} lines...{C_RESET}")
 
         try:
-            result = translate_batch_claude(
-                batch, source_lang, target_lang, api_key, model
-            )
+            if backend == "helsinki":
+                result = translate_batch_helsinki(batch, source_lang, target_lang)
+            elif backend == "ollama":
+                result = translate_batch_ollama(batch, source_lang, target_lang, model)
+            else:
+                result = translate_batch_claude(
+                    batch, source_lang, target_lang, api_key, model
+                )
         except Exception as e:
             print(f"  {C_RED}Translation error:{C_RESET} {e}", file=sys.stderr)
             return False
@@ -1211,7 +1323,7 @@ def main():
     parser.add_argument(
         "-t", "--translate-subs",
         metavar="SRT",
-        help="Translate an SRT file to another language via Claude API (requires: --to)"
+        help="Translate an SRT file to another language (requires: --to)"
     )
     parser.add_argument(
         "--to",
@@ -1220,8 +1332,14 @@ def main():
     )
     parser.add_argument(
         "--translate-model",
-        default="claude-haiku-4-5-20251001",
-        help="Claude model for translation (default: claude-haiku-4-5-20251001)"
+        default=None,
+        help="Model for translation (default per backend: claude=claude-haiku-4-5-20251001, ollama=qwen3:8b, helsinki=auto)"
+    )
+    parser.add_argument(
+        "--translate-backend",
+        default="claude",
+        choices=["claude", "helsinki", "ollama"],
+        help="Translation backend: claude (API, best quality), helsinki (local, lightweight), ollama (local LLM)"
     )
     parser.add_argument(
         "--coherent",
@@ -1294,22 +1412,35 @@ def main():
             print(f"Path not found: {target}", file=sys.stderr)
             sys.exit(1)
 
-    # Translate mode: translate SRT via Claude API
+    # Translate mode
     if args.translate_subs:
         if not args.to:
             print(f"{C_RED}Error: --translate-subs requires --to (target language){C_RESET}", file=sys.stderr)
             print("Example: --translate-subs movie.en.srt --to sv", file=sys.stderr)
             sys.exit(1)
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
-        if not api_key:
-            print(f"{C_RED}Error: ANTHROPIC_API_KEY is not set.{C_RESET}", file=sys.stderr)
-            print(f"See README for instructions.", file=sys.stderr)
-            sys.exit(1)
+
+        backend = args.translate_backend
+        # Resolve model: use explicit --translate-model, or backend default
+        _backend_defaults = {
+            "claude": "claude-haiku-4-5-20251001",
+            "ollama": "qwen3:8b",
+            "helsinki": None,  # model auto-constructed from language pair
+        }
+        model = args.translate_model or _backend_defaults.get(backend)
+
+        # Only require API key for claude backend
+        api_key = None
+        if backend == "claude":
+            api_key = os.environ.get("ANTHROPIC_API_KEY")
+            if not api_key:
+                print(f"{C_RED}Error: ANTHROPIC_API_KEY is not set.{C_RESET}", file=sys.stderr)
+                print(f"  Use --translate-backend helsinki or ollama for local translation.", file=sys.stderr)
+                sys.exit(1)
 
         srt_target = Path(args.translate_subs)
         if srt_target.is_file():
             success = translate_subtitles(
-                srt_target, args.to, api_key, args.translate_model, args.force
+                srt_target, args.to, api_key, model, args.force, backend=backend
             )
             sys.exit(0 if success else 1)
         elif srt_target.is_dir():
@@ -1324,7 +1455,7 @@ def main():
             ok = 0
             for sf in srt_files:
                 if translate_subtitles(
-                    sf, args.to, api_key, args.translate_model, args.force
+                    sf, args.to, api_key, model, args.force, backend=backend
                 ):
                     ok += 1
             print(f"\n{C_GREEN}Done!{C_RESET} {ok}/{len(srt_files)} translated.")
