@@ -997,23 +997,23 @@ def main():
         help="Whisper model (default: large-v3)"
     )
     parser.add_argument(
-        "--compute-type",
+        "-c", "--compute-type",
         default="int8",
         help="Whisper compute type: int8, float16, float32 (default: int8)"
     )
     parser.add_argument(
-        "--device",
+        "-d", "--device",
         default="auto",
         choices=["auto", "cuda", "cpu"],
         help="Device for Whisper: auto, cuda, cpu (default: auto)"
     )
     parser.add_argument(
-        "--force",
+        "-f", "--force",
         action="store_true",
         help="Overwrite existing subtitle files"
     )
     parser.add_argument(
-        "--sync",
+        "-s", "--sync",
         metavar="SRT",
         help="Sync an SRT file to video audio (requires: video_path + --sync sub.srt)"
     )
@@ -1023,7 +1023,7 @@ def main():
         help="Output file for --sync (default: overwrite input)"
     )
     parser.add_argument(
-        "--only-whisper",
+        "-w", "--only-whisper",
         action="store_true",
         help="Skip embedded subtitles, always use Whisper"
     )
@@ -1033,7 +1033,7 @@ def main():
         help="Download Swedish and English subtitles from OpenSubtitles.com"
     )
     parser.add_argument(
-        "--translate-subs",
+        "-t", "--translate-subs",
         metavar="SRT",
         help="Translate an SRT file to another language via Claude API (requires: --to)"
     )
