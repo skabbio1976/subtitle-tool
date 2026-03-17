@@ -627,11 +627,16 @@ def _preprocess_for_translation(segments: list[dict]) -> list[dict]:
             prev_text = prev["text"]
 
             # Merge if: tiny gap + previous doesn't end a sentence + short fragment
+            # But cap merged duration and length to avoid giant subtitle blocks
+            merged_duration = (_srt_ts_to_seconds(seg["end"])
+                               - _srt_ts_to_seconds(prev["start"]))
             should_merge = (
                 gap < 0.15
                 and prev_text
                 and prev_text[-1] not in '.!?"\')'
                 and (len(text.split()) <= 3 or text[0].islower())
+                and merged_duration <= 7.0
+                and len(prev_text) <= 84
             )
 
             if should_merge:
@@ -1040,7 +1045,6 @@ def translate_batch_helsinki(texts: list[str], source_lang: str,
             print(f"  Run: {C_BOLD}pip install transformers sentencepiece torch{C_RESET}", file=sys.stderr)
             raise
         import logging
-        import torch
         logging.getLogger("transformers").setLevel(logging.ERROR)
         model_name = f"Helsinki-NLP/opus-mt-{source_lang}-{target_lang}"
         print(f"  {C_DIM}Loading {model_name}...{C_RESET}")
@@ -1048,6 +1052,7 @@ def translate_batch_helsinki(texts: list[str], source_lang: str,
         _helsinki_model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
         _helsinki_model.eval()
 
+    import torch
     # Flatten multi-line entries and translate in batches
     flat_texts = [t.replace("\n", " ").strip() for t in texts]
     translated = []
