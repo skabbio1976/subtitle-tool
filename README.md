@@ -6,7 +6,7 @@ Extract, transcribe, translate, or download subtitles for video files.
 
 - **Extract** embedded SRT subtitles from video files (via ffmpeg)
 - **Transcribe** audio to subtitles with faster-whisper (GPU-accelerated)
-- **Translate** SRT files between languages via Claude API
+- **Translate** SRT files between languages (local or cloud — 10 backends)
 - **Download** Swedish and English subtitles from OpenSubtitles.com
 - **Sync** existing SRT files to video audio (via ffsubsync)
 - **Batch mode** - process all video/SRT files in a directory
@@ -28,22 +28,79 @@ pip install -r requirements.txt
 Some features require API keys, which are read from environment variables.
 **Never put API keys directly in commands or scripts.**
 
-### Anthropic (Claude) - for `--translate-subs`
+### Translation backends - for `--translate-subs`
 
-1. Create an account at [console.anthropic.com](https://console.anthropic.com/)
-2. Go to **API Keys** and create a new key
-3. Set the environment variable:
+Translation uses **Groq** by default (free, fast, great quality).
+Set `GROQ_API_KEY` to get started, or use `--translate-backend helsinki` for fully offline translation:
+
+| Backend | Quality | Speed | Cost | Setup |
+|---|---|---|---|---|
+| `groq` | Great | Very fast | Free tier (14K req/day) | API key (default) |
+| `helsinki` | Good (basic MT) | Fast (local) | Free | None (offline) |
+| `ollama` | Good-Great | Medium (local) | Free | Install Ollama |
+| `claude-code` | Excellent | Fast | Included in subscription | Install Claude Code |
+| `gemini` | Great | Fast | Free tier (1K req/day) | API key |
+| `github` | Great | Fast | Free tier (150 req/day) | GitHub token |
+| `mistral` | Great | Fast | Free tier (1B tokens/mo) | API key |
+| `openrouter` | Great | Fast | Free models available | API key |
+| `deepseek` | Great | Fast | Trial credits (30 days) | API key |
+| `openai` | Excellent | Fast | Paid | API key |
+| `claude` | Excellent | Fast | Paid | API key |
+
+#### Claude Code (uses your Claude subscription)
+
+If you have a Claude Pro/Max subscription and Claude Code installed, you can
+translate using your existing subscription — no API key needed:
 
 ```bash
-# bash / zsh (~/.bashrc or ~/.zshrc)
-export ANTHROPIC_API_KEY="sk-ant-..."
-
-# fish (~/.config/fish/config.fish)
-set -Ux ANTHROPIC_API_KEY "sk-ant-..."
-
-# Windows (PowerShell, permanent for current user)
-[Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY", "sk-ant-...", "User")
+npm install -g @anthropic-ai/claude-code
+claude auth login
+# That's it — now use --translate-backend claude-code
 ```
+
+#### Getting free API keys
+
+**Groq** (recommended cloud option — fastest, generous free tier):
+1. Sign up at [console.groq.com](https://console.groq.com/) (no credit card)
+2. Create an API key
+3. `export GROQ_API_KEY="gsk_..."`
+
+**Google Gemini:**
+1. Go to [aistudio.google.com](https://aistudio.google.com/) (no credit card)
+2. Get an API key
+3. `export GEMINI_API_KEY="AI..."`
+
+**GitHub Models** (use your existing GitHub account):
+1. Create a personal access token at [github.com/settings/tokens](https://github.com/settings/tokens) with `models:read` permission
+2. `export GITHUB_TOKEN="ghp_..."`
+
+**Mistral:**
+1. Sign up at [console.mistral.ai](https://console.mistral.ai/) (no credit card)
+2. Create an API key
+3. `export MISTRAL_API_KEY="..."`
+
+**OpenRouter:**
+1. Sign up at [openrouter.ai](https://openrouter.ai/) (no credit card for free models)
+2. Create an API key
+3. `export OPENROUTER_API_KEY="sk-or-..."`
+
+**DeepSeek** (30-day trial credits):
+1. Sign up at [platform.deepseek.com](https://platform.deepseek.com/) (no credit card)
+2. Create an API key
+3. `export DEEPSEEK_API_KEY="sk-..."`
+
+**OpenAI** (paid):
+1. Sign up at [platform.openai.com](https://platform.openai.com/)
+2. Create an API key
+3. `export OPENAI_API_KEY="sk-..."`
+
+**Anthropic Claude** (paid):
+1. Sign up at [console.anthropic.com](https://console.anthropic.com/)
+2. Create an API key
+3. `export ANTHROPIC_API_KEY="sk-ant-..."`
+
+For fish shell, use `set -Ux VAR_NAME "value"` instead of `export`.
+For Windows PowerShell: `[Environment]::SetEnvironmentVariable("VAR_NAME", "value", "User")`
 
 ### Hugging Face (optional) - for faster Whisper model downloads
 
@@ -148,15 +205,30 @@ If Whisper runs out of GPU memory, it automatically falls back to CPU.
 
 ### Translate subtitles
 
-Translate SRT files between languages using the Claude API.
-Requires `ANTHROPIC_API_KEY` (see above).
+Translate SRT files between languages. Uses Helsinki (local, free) by default.
+No API key or internet required for the default backend.
 
 ```bash
-# Translate English SRT to Swedish (uses Claude Haiku by default)
+# Translate English SRT to Swedish (Groq, free, fast — default)
 python subtitle_tool.py --translate-subs movie.en.srt --to sv .
 
-# Use a different Claude model
-python subtitle_tool.py --translate-subs movie.en.srt --to sv --translate-model claude-sonnet-4-6 .
+# Use Helsinki for offline translation (no API key needed)
+python subtitle_tool.py --translate-subs movie.en.srt --to sv --translate-backend helsinki .
+
+# Use Gemini
+python subtitle_tool.py --translate-subs movie.en.srt --to sv --translate-backend gemini .
+
+# Use local Ollama
+python subtitle_tool.py --translate-subs movie.en.srt --to sv --translate-backend ollama .
+
+# Use Claude Code (uses your Claude subscription, no API key needed)
+python subtitle_tool.py --translate-subs movie.en.srt --to sv --translate-backend claude-code .
+
+# Use Claude API (paid, requires API key)
+python subtitle_tool.py --translate-subs movie.en.srt --to sv --translate-backend claude .
+
+# Override the model for any backend
+python subtitle_tool.py --translate-subs movie.en.srt --to sv --translate-backend groq --translate-model llama-3.1-8b-instant .
 
 # Batch - translate all SRT files in a directory
 python subtitle_tool.py --translate-subs /path/to/subs/ --to sv .
@@ -164,6 +236,7 @@ python subtitle_tool.py --translate-subs /path/to/subs/ --to sv .
 
 Output filename is determined automatically: `movie.en.srt` becomes `movie.sv.srt`.
 The source language is detected from the filename (e.g., `.en.srt` = English).
+If a matching video file is found, translated subtitles are auto-synced to the audio.
 
 ### Download from OpenSubtitles.com
 
@@ -251,7 +324,7 @@ pyinstaller --onefile subtitle_tool.py
 ./dist/subtitle_tool --help
 ```
 
-> **Note:** The binary will be large (~300-500 MB) because it bundles the Python
+> **Note:** The binary will be large (~1.2-1.4 BB) because it bundles the Python
 > runtime and all dependencies including CUDA/cuDNN libraries from faster-whisper.
 > Whisper model files are **not** included — they are downloaded on first run.
 > ffmpeg/ffprobe and ffsubsync must still be installed separately on the system.

@@ -6,3 +6,4 @@ nvidia-cudnn-cu12
 torch
 transformers
 sentencepiece
+sacremoses

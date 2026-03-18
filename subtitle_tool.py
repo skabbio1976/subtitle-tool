@@ -10,6 +10,7 @@
 #     "torch",
 #     "transformers",
 #     "sentencepiece",
+#     "sacremoses",
 # ]
 # ///
 """Extract, transcribe, translate, or sync subtitles for video files.
@@ -125,6 +126,24 @@ def check_dependencies(needs_ffmpeg=True, needs_whisper=False, needs_sync=False)
         for name, fix in missing:
             print(f"  {C_RED}-{C_RESET} {C_BOLD}{name}{C_RESET}: {fix}", file=sys.stderr)
         sys.exit(1)
+
+
+_VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".m4v", ".ts", ".webm", ".wmv"}
+
+
+def _find_video_for_srt(srt_path: Path) -> Path | None:
+    """Find the video file matching an SRT file by stripping language/sub suffixes."""
+    # "Movie.en.srt" -> "Movie", try common video extensions
+    stem = srt_path.stem
+    # Strip language code suffix (e.g. ".en", ".sv")
+    parts = stem.rsplit(".", 1)
+    if len(parts) == 2 and len(parts[1]) <= 3 and parts[1].isalpha():
+        stem = parts[0]
+    for ext in _VIDEO_EXTENSIONS:
+        candidate = srt_path.parent / f"{stem}{ext}"
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def sync_subtitles(video_path: Path, srt_path: Path, output_path: Path | None) -> bool:
@@ -916,6 +935,8 @@ def translate_batch_claude(texts: list[str], source_lang: str, target_lang: str,
         f"Translate these subtitle lines from {source_name} to {target_name}.\n\n"
         f"Rules:\n"
         f"- Return ONLY numbered translations, matching input numbering exactly.\n"
+        f"- These lines are consecutive dialogue from the same scene — "
+        f"maintain consistent tone and character voice across lines.\n"
         f"- This is spoken dialogue from a film/TV show. Use natural, "
         f"colloquial {target_name} appropriate for the tone.\n"
         f"- Adapt idioms and slang to equivalent {target_name} expressions "
@@ -1062,7 +1083,15 @@ def translate_batch_helsinki(texts: list[str], source_lang: str,
         inputs = _helsinki_tokenizer(chunk, return_tensors="pt", padding=True,
                                      truncation=True, max_length=512)
         with torch.no_grad():
-            outputs = _helsinki_model.generate(**inputs, max_length=512)
+            # Cap output at ~1.5x source token count to keep subtitle length sane
+            max_src_tokens = inputs["input_ids"].shape[1]
+            outputs = _helsinki_model.generate(
+                **inputs,
+                max_length=int(max_src_tokens * 1.5) + 10,
+                num_beams=4,
+                length_penalty=0.8,  # prefer shorter translations
+                no_repeat_ngram_size=3,
+            )
         translated.extend(_helsinki_tokenizer.batch_decode(outputs,
                                                            skip_special_tokens=True))
     return translated
@@ -1086,6 +1115,8 @@ def translate_batch_ollama(texts: list[str], source_lang: str,
         f"Translate these subtitle lines from {source_name} to {target_name}.\n\n"
         f"Rules:\n"
         f"- Return ONLY numbered translations, matching input numbering exactly.\n"
+        f"- These lines are consecutive dialogue from the same scene — "
+        f"maintain consistent tone and character voice across lines.\n"
         f"- This is spoken dialogue from a film/TV show. Use natural, "
         f"colloquial {target_name} appropriate for the tone.\n"
         f"- Adapt idioms and slang to equivalent {target_name} expressions "
@@ -1140,6 +1171,201 @@ def translate_batch_ollama(texts: list[str], source_lang: str,
     return _parse_numbered_response(response_text, len(texts), texts)
 
 
+def translate_batch_claude_code(texts: list[str], source_lang: str,
+                                target_lang: str, model: str | None) -> list[str]:
+    """Translate using Claude Code CLI (claude -p).
+
+    Uses the user's existing Claude subscription — no API key needed.
+    Requires 'claude' to be installed and authenticated.
+    """
+    source_name = LANG_NAMES.get(source_lang, source_lang)
+    target_name = LANG_NAMES.get(target_lang, target_lang)
+
+    numbered = "\n".join(
+        f"{i+1}: {t.replace(chr(10), ' ')}" for i, t in enumerate(texts)
+    )
+
+    prompt = (
+        f"Translate these subtitle lines from {source_name} to {target_name}.\n\n"
+        f"Rules:\n"
+        f"- Return ONLY numbered translations, matching input numbering exactly.\n"
+        f"- These lines are consecutive dialogue from the same scene — "
+        f"maintain consistent tone and character voice across lines.\n"
+        f"- This is spoken dialogue from a film/TV show. Use natural, "
+        f"colloquial {target_name} appropriate for the tone.\n"
+        f"- Adapt idioms and slang to equivalent {target_name} expressions "
+        f"rather than translating literally.\n"
+        f"- Keep proper nouns, place names, and titles unchanged.\n"
+        f"- Keep each line under 42 characters when possible (subtitle display limit).\n"
+        f"- Do not add explanations, notes, or commentary.\n\n"
+        f"{numbered}"
+    )
+
+    cmd = ["claude", "-p", "--no-session-persistence", "--tools", ""]
+    if model:
+        cmd += ["--model", model]
+    cmd += ["--system-prompt",
+            "You are an expert subtitle translator for film and television. "
+            "You produce natural, idiomatic translations that sound like "
+            "real spoken dialogue — not written text. "
+            "You match the register and tone of each character: "
+            "slang stays slang, formal stays formal. "
+            "You adapt idioms to equivalent expressions in the target language "
+            "rather than translating literally. "
+            "You never explain, add notes, or deviate from the numbered format."]
+
+    try:
+        result = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=300)
+    except FileNotFoundError:
+        print(f"  {C_RED}Error: 'claude' command not found.{C_RESET}", file=sys.stderr)
+        print(f"  Install Claude Code: {C_BOLD}npm install -g @anthropic-ai/claude-code{C_RESET}", file=sys.stderr)
+        raise
+    except subprocess.TimeoutExpired:
+        print(f"  {C_RED}Error: Claude Code timed out after 300s{C_RESET}", file=sys.stderr)
+        raise
+
+    if result.returncode != 0:
+        error = result.stderr.strip() if result.stderr else ""
+        output = result.stdout.strip() if result.stdout else ""
+        detail = error or output or "unknown error (exit code {})".format(result.returncode)
+        print(f"  {C_RED}Claude Code error:{C_RESET} {detail[:500]}", file=sys.stderr)
+        raise RuntimeError(f"claude -p failed (exit {result.returncode})")
+
+    return _parse_numbered_response(result.stdout.strip(), len(texts), texts)
+
+
+# Pre-configured OpenAI-compatible providers (base_url, env_var_for_key, default_model)
+_OPENAI_PROVIDERS = {
+    "groq": (
+        "https://api.groq.com/openai/v1",
+        "GROQ_API_KEY",
+        "llama-3.3-70b-versatile",
+    ),
+    "gemini": (
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        "GEMINI_API_KEY",
+        "gemini-2.5-flash",
+    ),
+    "github": (
+        "https://models.github.ai/inference",
+        "GITHUB_TOKEN",
+        "openai/gpt-4o-mini",
+    ),
+    "mistral": (
+        "https://api.mistral.ai/v1",
+        "MISTRAL_API_KEY",
+        "mistral-small-latest",
+    ),
+    "openrouter": (
+        "https://openrouter.ai/api/v1",
+        "OPENROUTER_API_KEY",
+        "meta-llama/llama-3.3-70b-instruct:free",
+    ),
+    "deepseek": (
+        "https://api.deepseek.com/v1",
+        "DEEPSEEK_API_KEY",
+        "deepseek-chat",
+    ),
+    "openai": (
+        "https://api.openai.com/v1",
+        "OPENAI_API_KEY",
+        "gpt-4o-mini",
+    ),
+}
+
+
+def translate_batch_openai(texts: list[str], source_lang: str,
+                           target_lang: str, api_key: str,
+                           model: str, base_url: str) -> list[str]:
+    """Translate via any OpenAI-compatible API (Groq, Gemini, GitHub, Mistral, etc.)."""
+    source_name = LANG_NAMES.get(source_lang, source_lang)
+    target_name = LANG_NAMES.get(target_lang, target_lang)
+
+    numbered = "\n".join(
+        f"{i+1}: {t.replace(chr(10), ' ')}" for i, t in enumerate(texts)
+    )
+
+    prompt = (
+        f"Translate these subtitle lines from {source_name} to {target_name}.\n\n"
+        f"Rules:\n"
+        f"- Return ONLY numbered translations, matching input numbering exactly.\n"
+        f"- These lines are consecutive dialogue from the same scene — "
+        f"maintain consistent tone and character voice across lines.\n"
+        f"- This is spoken dialogue from a film/TV show. Use natural, "
+        f"colloquial {target_name} appropriate for the tone.\n"
+        f"- Adapt idioms and slang to equivalent {target_name} expressions "
+        f"rather than translating literally.\n"
+        f"- Keep proper nouns, place names, and titles unchanged.\n"
+        f"- Keep each line under 42 characters when possible (subtitle display limit).\n"
+        f"- Do not add explanations, notes, or commentary.\n\n"
+        f"{numbered}"
+    )
+
+    system_msg = (
+        "You are an expert subtitle translator for film and television. "
+        "You produce natural, idiomatic translations that sound like "
+        "real spoken dialogue — not written text. "
+        "You match the register and tone of each character: "
+        "slang stays slang, formal stays formal. "
+        "You adapt idioms to equivalent expressions in the target language "
+        "rather than translating literally. "
+        "You never explain, add notes, or deviate from the numbered format."
+    )
+
+    body = json.dumps({
+        "model": model,
+        "temperature": 0.3,
+        "messages": [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": prompt},
+        ],
+    }).encode()
+
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "subtitle-tool/1.0",
+        },
+    )
+
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.loads(resp.read().decode())
+            break
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode() if e.fp else ""
+            if e.code in (429, 529) and attempt < max_retries:
+                wait = attempt * 15
+                print(f"  {C_YELLOW}API busy ({e.code}) - retrying in {wait}s (attempt {attempt}/{max_retries})...{C_RESET}")
+                time.sleep(wait)
+                req = urllib.request.Request(url, data=body, headers=dict(req.headers))
+                continue
+            print(f"  {C_RED}API error:{C_RESET} {e.code} {e.reason}", file=sys.stderr)
+            if error_body:
+                print(f"  {error_body[:200]}", file=sys.stderr)
+            raise
+        except (urllib.error.URLError, ConnectionError, OSError) as e:
+            if attempt < max_retries:
+                wait = attempt * 10
+                print(f"  {C_YELLOW}Connection error - retrying in {wait}s (attempt {attempt}/{max_retries})...{C_RESET}")
+                time.sleep(wait)
+                req = urllib.request.Request(url, data=body, headers=dict(req.headers))
+                continue
+            print(f"  {C_RED}Network error:{C_RESET} {e}", file=sys.stderr)
+            raise
+
+    response_text = data["choices"][0]["message"]["content"]
+    # Strip <think>...</think> blocks (some models include reasoning)
+    response_text = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL).strip()
+    return _parse_numbered_response(response_text, len(texts), texts)
+
+
 def _translate_output_path(srt_path: Path, target_lang: str) -> Path:
     """Determine output filename for translation."""
     stem = srt_path.stem
@@ -1155,7 +1381,9 @@ def translate_subtitles(srt_path: Path, target_lang: str, api_key: str,
                         backend: str = "claude") -> bool:
     """Translate an SRT file to another language.
 
-    Backends: claude (Anthropic API), ollama (local LLM), helsinki (opus-mt).
+    Backends: helsinki (local opus-mt), ollama (local LLM),
+    groq/gemini/github/mistral/openrouter/deepseek/openai (cloud),
+    claude (Anthropic API).
     """
     output_path = _translate_output_path(srt_path, target_lang)
 
@@ -1189,8 +1417,10 @@ def translate_subtitles(srt_path: Path, target_lang: str, api_key: str,
     print(f"  Subtitle count: {C_BOLD}{len(segments)}{C_RESET}")
 
     # Split into scene-based batches (never breaks mid-scene)
+    # claude-code has subprocess overhead, so use smaller batches
+    max_batch = 50 if backend == "claude-code" else 200
     all_texts = [s["text"] for s in segments]
-    batches = _split_into_scene_batches(segments, gap_threshold=4.0, max_batch=200)
+    batches = _split_into_scene_batches(segments, gap_threshold=4.0, max_batch=max_batch)
     total_batches = len(batches)
     translated_texts = [""] * len(all_texts)
 
@@ -1207,6 +1437,13 @@ def translate_subtitles(srt_path: Path, target_lang: str, api_key: str,
                 result = translate_batch_helsinki(batch, source_lang, target_lang)
             elif backend == "ollama":
                 result = translate_batch_ollama(batch, source_lang, target_lang, model)
+            elif backend == "claude-code":
+                result = translate_batch_claude_code(batch, source_lang, target_lang, model)
+            elif backend in _OPENAI_PROVIDERS:
+                base_url, _, _ = _OPENAI_PROVIDERS[backend]
+                result = translate_batch_openai(
+                    batch, source_lang, target_lang, api_key, model, base_url
+                )
             else:
                 result = translate_batch_claude(
                     batch, source_lang, target_lang, api_key, model
@@ -1242,6 +1479,12 @@ def translate_subtitles(srt_path: Path, target_lang: str, api_key: str,
 
     write_srt(output_segments, output_path)
     print(f"  {C_GREEN}Done! Saved: {output_path.name} ({len(segments)} lines translated){C_RESET}")
+
+    # Auto-sync translated subs against video if we can find it
+    video = _find_video_for_srt(output_path)
+    if video:
+        print(f"  {C_DIM}Auto-syncing translated subs...{C_RESET}")
+        sync_subtitles(video, output_path, output_path)
     return True
 
 
@@ -1362,13 +1605,16 @@ def main():
     parser.add_argument(
         "--translate-model",
         default=None,
-        help="Model for translation (default per backend: claude=claude-haiku-4-5-20251001, ollama=qwen3:8b, helsinki=auto)"
+        help="Model for translation (default varies per backend)"
     )
     parser.add_argument(
         "--translate-backend",
-        default="claude",
-        choices=["claude", "helsinki", "ollama"],
-        help="Translation backend: claude (API, best quality), helsinki (local, lightweight), ollama (local LLM)"
+        default="groq",
+        choices=["claude", "claude-code", "helsinki", "ollama"] + list(_OPENAI_PROVIDERS.keys()),
+        help="Translation backend: groq (cloud, free, fast, default), helsinki (local, free), "
+             "ollama (local LLM), claude-code (Claude subscription via CLI), "
+             "gemini/github/mistral/openrouter/deepseek/openai (cloud), "
+             "claude (Anthropic API key)"
     )
     parser.add_argument(
         "--coherent",
@@ -1455,15 +1701,25 @@ def main():
             "ollama": "qwen3:8b",
             "helsinki": None,  # model auto-constructed from language pair
         }
+        # Add defaults from OpenAI providers
+        for pname, (_, _, default_model) in _OPENAI_PROVIDERS.items():
+            _backend_defaults[pname] = default_model
         model = args.translate_model or _backend_defaults.get(backend)
 
-        # Only require API key for claude backend
+        # Resolve API key based on backend
         api_key = None
         if backend == "claude":
             api_key = os.environ.get("ANTHROPIC_API_KEY")
             if not api_key:
                 print(f"{C_RED}Error: ANTHROPIC_API_KEY is not set.{C_RESET}", file=sys.stderr)
                 print(f"  Use --translate-backend helsinki or ollama for local translation.", file=sys.stderr)
+                sys.exit(1)
+        elif backend in _OPENAI_PROVIDERS:
+            _, env_var, _ = _OPENAI_PROVIDERS[backend]
+            api_key = os.environ.get(env_var)
+            if not api_key:
+                print(f"{C_RED}Error: {env_var} is not set.{C_RESET}", file=sys.stderr)
+                print(f"  Get a free API key and set: export {env_var}=your-key", file=sys.stderr)
                 sys.exit(1)
 
         srt_target = Path(args.translate_subs)
