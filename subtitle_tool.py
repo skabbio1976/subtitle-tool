@@ -1417,8 +1417,9 @@ def translate_subtitles(srt_path: Path, target_lang: str, api_key: str,
     print(f"  Subtitle count: {C_BOLD}{len(segments)}{C_RESET}")
 
     # Split into scene-based batches (never breaks mid-scene)
-    # claude-code has subprocess overhead, so use smaller batches
-    max_batch = 50 if backend == "claude-code" else 200
+    # Smaller batches for backends with tighter limits
+    _batch_limits = {"claude-code": 50, "groq": 100}
+    max_batch = _batch_limits.get(backend, 200)
     all_texts = [s["text"] for s in segments]
     batches = _split_into_scene_batches(segments, gap_threshold=4.0, max_batch=max_batch)
     total_batches = len(batches)
@@ -1463,9 +1464,10 @@ def translate_subtitles(srt_path: Path, target_lang: str, api_key: str,
         for idx, text in zip(indices, result):
             translated_texts[idx] = text
 
-        # Small delay between batches to respect rate limits
+        # Delay between batches to respect rate limits (Groq free: 12K TPM)
         if batch_num < total_batches:
-            time.sleep(2)
+            delay = 8 if backend == "groq" else 2
+            time.sleep(delay)
 
     # Build output segments with original timestamps (wrap long lines for display)
     output_segments = []
@@ -1609,9 +1611,9 @@ def main():
     )
     parser.add_argument(
         "--translate-backend",
-        default="groq",
+        default="mistral",
         choices=["claude", "claude-code", "helsinki", "ollama"] + list(_OPENAI_PROVIDERS.keys()),
-        help="Translation backend: groq (cloud, free, fast, default), helsinki (local, free), "
+        help="Translation backend: mistral (cloud, free, default), groq (cloud, free, fast), helsinki (local, free), "
              "ollama (local LLM), claude-code (Claude subscription via CLI), "
              "gemini/github/mistral/openrouter/deepseek/openai (cloud), "
              "claude (Anthropic API key)"
@@ -1732,6 +1734,7 @@ def main():
             srt_files = sorted(
                 f for f in srt_target.rglob("*")
                 if f.is_file() and f.suffix.lower() == ".srt"
+                and not f.stem.endswith(f".{args.to}")  # skip already-translated
             )
             if not srt_files:
                 print(f"No SRT files found in: {srt_target}")

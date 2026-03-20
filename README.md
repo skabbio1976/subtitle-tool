@@ -30,18 +30,18 @@ Some features require API keys, which are read from environment variables.
 
 ### Translation backends - for `--translate-subs`
 
-Translation uses **Groq** by default (free, fast, great quality).
-Set `GROQ_API_KEY` to get started, or use `--translate-backend helsinki` for fully offline translation:
+Translation uses **Mistral** by default (free, great quality, 1B tokens/month).
+Set `MISTRAL_API_KEY` to get started, or use `--translate-backend helsinki` for fully offline translation:
 
 | Backend | Quality | Speed | Cost | Setup |
 |---|---|---|---|---|
-| `groq` | Great | Very fast | Free tier (14K req/day) | API key (default) |
+| `mistral` | Great | Fast | Free tier (1B tokens/mo) | API key (default) |
+| `groq` | Great | Very fast | Free tier (100K tokens/day) | API key |
 | `helsinki` | Good (basic MT) | Fast (local) | Free | None (offline) |
 | `ollama` | Good-Great | Medium (local) | Free | Install Ollama |
 | `claude-code` | Excellent | Fast | Included in subscription | Install Claude Code |
 | `gemini` | Great | Fast | Free tier (1K req/day) | API key |
 | `github` | Great | Fast | Free tier (150 req/day) | GitHub token |
-| `mistral` | Great | Fast | Free tier (1B tokens/mo) | API key |
 | `openrouter` | Great | Fast | Free models available | API key |
 | `deepseek` | Great | Fast | Trial credits (30 days) | API key |
 | `openai` | Excellent | Fast | Paid | API key |
@@ -209,7 +209,7 @@ Translate SRT files between languages. Uses Helsinki (local, free) by default.
 No API key or internet required for the default backend.
 
 ```bash
-# Translate English SRT to Swedish (Groq, free, fast — default)
+# Translate English SRT to Swedish (Mistral, free — default)
 python subtitle_tool.py --translate-subs movie.en.srt --to sv .
 
 # Use Helsinki for offline translation (no API key needed)
